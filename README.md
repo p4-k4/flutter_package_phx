@@ -1,15 +1,17 @@
 # PHX
 
-A Flutter package for Phoenix channels with offline support. This package provides a robust solution for handling Phoenix channel communication with built-in offline capabilities.
+A proof of concept Flutter package demonstrating Phoenix/Ecto integration with Flutter apps, providing offline capabilities and sync functionality. This package serves as a foundation for studying and implementing more elegant solutions for Phoenix database integration, authentication, and other Phoenix framework benefits in Flutter applications.
 
 ## Features
 
 - 🔄 Phoenix WebSocket client implementation
+- 💾 SQLite database integration for offline data persistence
 - 📡 Offline operation support with automatic message queueing
 - 🔁 Automatic reconnection handling
 - 🚦 Connection state management
 - 📊 Sync state tracking
 - 🔌 Graceful connection loss handling
+- 🗃️ Ecto-powered database operations
 
 ## Installation
 
@@ -97,15 +99,42 @@ syncManager.syncStateStream.listen((state) {
 syncManager.dispose();
 ```
 
-## Example
+## Examples
 
-The package includes a counter example demonstrating offline capabilities:
+The package includes two examples demonstrating offline capabilities:
 
-1. A Phoenix server implementing a simple counter channel
-2. A Flutter app that can increment the counter while offline
-3. Automatic syncing when connection is restored
+### Todo Example
+A full-stack todo application showcasing:
+- Phoenix/Ecto backend with proper database schema and migrations
+- Flutter frontend with SQLite offline storage
+- Real-time sync between multiple clients
+- Offline CRUD operations with automatic sync
+- Channel-based communication
 
-To run the example:
+To run the todo example:
+
+1. Start the Phoenix server:
+```bash
+cd example/phoenix_todo
+mix deps.get
+mix ecto.setup
+mix phx.server
+```
+
+2. Run the Flutter app:
+```bash
+cd example/flutter_todo
+flutter run
+```
+
+Try:
+- Creating, updating, and deleting todos while connected
+- Going offline and making changes
+- Reconnecting to see changes sync automatically
+- Running multiple clients to see real-time updates
+
+### Counter Example
+A simpler example focusing on basic offline capabilities:
 
 1. Start the Phoenix server:
 ```bash
@@ -125,6 +154,24 @@ Try:
 - Stopping the Phoenix server
 - Incrementing while offline
 - Starting the server - changes sync automatically
+
+## Development Notes
+
+This package is a proof of concept demonstrating the possibilities of integrating Phoenix's powerful features with Flutter applications. Key areas demonstrated include:
+
+- SQLite database integration for offline persistence
+- Phoenix channel-based real-time communication
+- Ecto schema and migration integration
+- Offline operation handling
+- Sync conflict resolution
+- Real-time multi-client updates
+
+Future development could focus on:
+- More elegant database integration patterns
+- Authentication and authorization
+- Better error handling and conflict resolution
+- Improved state management
+- Simplified setup and configuration
 
 ## Features and bugs
 

@@ -32,6 +32,7 @@ class PhxClient {
   final _connectionStateController = StreamController<bool>.broadcast();
   int _ref = 0;
   bool _connected = false;
+  bool _disposed = false;
   final Map<String, Completer<Map<String, dynamic>>> _pendingResponses = {};
   final Map<String, Map<String, Function(Map<String, dynamic>)>>
       _channelHandlers = {};
@@ -44,11 +45,15 @@ class PhxClient {
   Stream<PhxMessage>? get messageStream => _messageController.stream;
   Stream<bool>? get connectionStateStream => _connectionStateController.stream;
 
-  bool isConnected() => _connected && _socket != null;
+  bool isConnected() => _connected && _socket != null && !_disposed;
 
   Future<void> connect() async {
+    if (_disposed) {
+      throw Exception('Client is disposed');
+    }
+
     if (_socket != null) {
-      return;
+      await _cleanup();
     }
 
     try {
@@ -77,7 +82,32 @@ class PhxClient {
     }
   }
 
+  Future<void> _cleanup() async {
+    _connected = false;
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
+
+    // Clear all pending responses
+    for (final completer in _pendingResponses.values) {
+      if (!completer.isCompleted) {
+        completer.completeError('Connection cleanup');
+      }
+    }
+    _pendingResponses.clear();
+
+    // Clear channel handlers
+    _channelHandlers.clear();
+
+    // Close existing socket
+    if (_socket != null) {
+      await _socket!.close();
+      _socket = null;
+    }
+  }
+
   void _handleDisconnect() {
+    if (_disposed) return;
+
     _connected = false;
     _socket = null;
     _heartbeatTimer?.cancel();
@@ -91,12 +121,15 @@ class PhxClient {
       }
     }
     _pendingResponses.clear();
+
+    // Clear channel handlers on disconnect
+    _channelHandlers.clear();
   }
 
   void _startHeartbeat() {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = Timer.periodic(heartbeatInterval, (timer) {
-      if (_connected) {
+      if (_connected && !_disposed) {
         push('phoenix', 'heartbeat', {}).catchError((e) {
           print('Heartbeat failed: $e');
         });
@@ -105,6 +138,8 @@ class PhxClient {
   }
 
   void _handleMessage(String rawMessage) {
+    if (_disposed) return;
+
     final data = json.decode(rawMessage);
     final topic = data[2] as String;
     final event = data[3] as String;
@@ -143,7 +178,7 @@ class PhxClient {
         // Handle channel events
         final handlers = _channelHandlers[topic];
         if (handlers != null && handlers.containsKey(event)) {
-          handlers[event]!(payload['response'] ?? {});
+          handlers[event]!(payload);
         }
     }
 
@@ -155,6 +190,10 @@ class PhxClient {
   }
 
   Future<Map<String, dynamic>> joinChannel(String topic) async {
+    if (_disposed) {
+      throw Exception('Client is disposed');
+    }
+
     if (!_connected) {
       throw Exception('Not connected');
     }
@@ -185,6 +224,10 @@ class PhxClient {
     String event,
     Map<String, dynamic> payload,
   ) async {
+    if (_disposed) {
+      throw Exception('Client is disposed');
+    }
+
     if (!_connected) {
       throw Exception('Not connected');
     }
@@ -220,17 +263,18 @@ class PhxClient {
     String event,
     Function(Map<String, dynamic>) callback,
   ) {
+    if (_disposed) return;
+
     _channelHandlers.putIfAbsent(topic, () => {});
     _channelHandlers[topic]![event] = callback;
   }
 
-  void disconnect() {
-    _connected = false;
-    _heartbeatTimer?.cancel();
-    _socket?.close();
-    _socket = null;
-    _connectionStateController.add(false);
-    _messageController.close();
-    _connectionStateController.close();
+  Future<void> disconnect() async {
+    if (_disposed) return;
+
+    _disposed = true;
+    await _cleanup();
+    await _messageController.close();
+    await _connectionStateController.close();
   }
 }

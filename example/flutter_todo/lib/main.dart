@@ -1,60 +1,54 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:phx/phx.dart';
 import 'services/todo_service.dart';
 import 'models/todo.dart';
 
 void main() {
-  runApp(const MyApp());
+  runApp(
+    ChangeNotifierProvider(
+      create: (context) => TodoService(),
+      child: const TodoApp(),
+    ),
+  );
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class TodoApp extends StatelessWidget {
+  const TodoApp({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return ChangeNotifierProvider(
-      create: (_) => TodoService(),
-      child: MaterialApp(
-        title: 'Flutter Todo',
-        theme: ThemeData(
-          colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
-          useMaterial3: true,
-        ),
-        home: const TodoScreen(),
+    return MaterialApp(
+      title: 'Flutter Todo',
+      theme: ThemeData(
+        primarySwatch: Colors.blue,
       ),
+      home: const TodoList(),
     );
   }
 }
 
-class TodoScreen extends StatefulWidget {
-  const TodoScreen({super.key});
+class TodoList extends StatefulWidget {
+  const TodoList({super.key});
 
   @override
-  State<TodoScreen> createState() => _TodoScreenState();
+  TodoListState createState() => TodoListState();
 }
 
-class _TodoScreenState extends State<TodoScreen> {
+class TodoListState extends State<TodoList> {
   final _textController = TextEditingController();
+  bool _initialized = false;
 
   @override
   void initState() {
     super.initState();
-    // Use addPostFrameCallback to avoid setState during build
+    // Delay initialization to avoid setState during build
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _initializeTodoService();
-    });
-  }
-
-  Future<void> _initializeTodoService() async {
-    try {
-      await context.read<TodoService>().initialize();
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error: $e')),
-        );
+      if (!_initialized) {
+        _initialized = true;
+        context.read<TodoService>().initialize();
       }
-    }
+    });
   }
 
   @override
@@ -68,48 +62,106 @@ class _TodoScreenState extends State<TodoScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Flutter Todo'),
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(4),
-          child: Consumer<TodoService>(
-            builder: (context, service, child) {
-              if (service.isOffline) {
-                return Container(
-                  width: double.infinity,
-                  color: Colors.orange,
-                  padding: const EdgeInsets.symmetric(vertical: 4),
-                  child: const Text(
-                    'Offline - Changes will sync when online',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: Colors.white),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.delete_sweep),
+            tooltip: 'Clear All Data',
+            onPressed: () async {
+              final confirmed = await showDialog<bool>(
+                context: context,
+                builder: (context) => AlertDialog(
+                  title: const Text('Clear All Data'),
+                  content: const Text(
+                    'This will clear all todos and pending operations. This action cannot be undone.',
                   ),
-                );
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.pop(context, false),
+                      child: const Text('Cancel'),
+                    ),
+                    TextButton(
+                      onPressed: () => Navigator.pop(context, true),
+                      child: const Text('Clear'),
+                    ),
+                  ],
+                ),
+              );
+
+              if (confirmed == true) {
+                await context.read<TodoService>().clearDatabases();
               }
-              return const SizedBox.shrink();
+            },
+          ),
+        ],
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(24.0),
+          child: Consumer<TodoService>(
+            builder: (context, todoService, child) {
+              final textColor = Theme.of(context).colorScheme.onPrimary;
+              return Container(
+                width: double.infinity,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16.0, vertical: 4.0),
+                child: Row(
+                  children: [
+                    Icon(
+                      todoService.syncState == SyncState.connected
+                          ? Icons.cloud_done
+                          : todoService.syncState == SyncState.syncing
+                              ? Icons.cloud_sync
+                              : Icons.cloud_off,
+                      color: textColor,
+                      size: 16,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      todoService.statusText,
+                      style: TextStyle(color: textColor, fontSize: 12),
+                    ),
+                  ],
+                ),
+              );
             },
           ),
         ),
       ),
       body: Consumer<TodoService>(
-        builder: (context, service, child) {
-          if (service.isLoading) {
-            return const Center(child: CircularProgressIndicator());
-          }
-
-          if (service.hasError && service.todos.isEmpty) {
-            return Center(
+        builder: (context, todoService, child) {
+          if (todoService.isLoading) {
+            return const Center(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Text(
-                    service.error ?? 'An error occurred',
-                    textAlign: TextAlign.center,
-                  ),
-                  const SizedBox(height: 16),
-                  ElevatedButton(
-                    onPressed: _initializeTodoService,
-                    child: const Text('Retry'),
-                  ),
+                  CircularProgressIndicator(),
+                  SizedBox(height: 16),
+                  Text('Connecting to server...'),
                 ],
+              ),
+            );
+          }
+
+          if (todoService.hasError) {
+            return Center(
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(Icons.error_outline,
+                        size: 48, color: Colors.red),
+                    const SizedBox(height: 16),
+                    Text(
+                      todoService.error ?? 'An error occurred',
+                      style: const TextStyle(color: Colors.red),
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 16),
+                    ElevatedButton(
+                      onPressed: () => todoService.initialize(),
+                      child: const Text('Retry'),
+                    ),
+                  ],
+                ),
               ),
             );
           }
@@ -117,28 +169,30 @@ class _TodoScreenState extends State<TodoScreen> {
           return Column(
             children: [
               Padding(
-                padding: const EdgeInsets.all(16),
+                padding: const EdgeInsets.all(8.0),
                 child: Row(
                   children: [
                     Expanded(
                       child: TextField(
                         controller: _textController,
                         decoration: const InputDecoration(
-                          hintText: 'What needs to be done?',
+                          hintText: 'Add a new todo',
+                          border: OutlineInputBorder(),
                         ),
-                        onSubmitted: (value) {
-                          if (value.isNotEmpty) {
-                            service.addTodo(value);
+                        onSubmitted: (text) {
+                          if (text.isNotEmpty) {
+                            todoService.addTodo(text);
                             _textController.clear();
                           }
                         },
                       ),
                     ),
-                    IconButton(
+                    const SizedBox(width: 8),
+                    IconButton.filled(
                       icon: const Icon(Icons.add),
                       onPressed: () {
                         if (_textController.text.isNotEmpty) {
-                          service.addTodo(_textController.text);
+                          todoService.addTodo(_textController.text);
                           _textController.clear();
                         }
                       },
@@ -146,94 +200,56 @@ class _TodoScreenState extends State<TodoScreen> {
                   ],
                 ),
               ),
-              if (service.hasError)
-                Container(
-                  width: double.infinity,
-                  color: Colors.red.shade100,
-                  padding: const EdgeInsets.all(8),
-                  child: Text(
-                    service.error ?? 'An error occurred',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: Colors.red.shade900),
-                  ),
-                ),
               Expanded(
-                child: ListView.builder(
-                  itemCount: service.todos.length,
-                  itemBuilder: (context, index) {
-                    final todo = service.todos[index];
-                    return TodoItem(
-                      key: ValueKey(todo.id),
-                      todo: todo,
-                      onToggle: () => service.toggleTodo(todo),
-                      onDelete: () => service.deleteTodo(todo),
-                    );
-                  },
-                ),
+                child: todoService.todos.isEmpty
+                    ? const Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.list, size: 48, color: Colors.grey),
+                            SizedBox(height: 16),
+                            Text(
+                              'No todos yet\nAdd your first todo above',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(color: Colors.grey),
+                            ),
+                          ],
+                        ),
+                      )
+                    : ListView.builder(
+                        itemCount: todoService.todos.length,
+                        itemBuilder: (context, index) {
+                          final todo = todoService.todos[index];
+                          return Card(
+                            margin: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 4,
+                            ),
+                            child: ListTile(
+                              leading: Checkbox(
+                                value: todo.completed,
+                                onChanged: (_) => todoService.toggleTodo(todo),
+                              ),
+                              title: Text(
+                                todo.text,
+                                style: TextStyle(
+                                  decoration: todo.completed
+                                      ? TextDecoration.lineThrough
+                                      : null,
+                                ),
+                              ),
+                              trailing: IconButton(
+                                icon: const Icon(Icons.delete),
+                                onPressed: () => todoService.deleteTodo(todo),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
               ),
             ],
           );
         },
-      ),
-    );
-  }
-}
-
-class TodoItem extends StatelessWidget {
-  final Todo todo;
-  final VoidCallback onToggle;
-  final VoidCallback onDelete;
-
-  const TodoItem({
-    super.key,
-    required this.todo,
-    required this.onToggle,
-    required this.onDelete,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final isOptimistic = todo.id.startsWith('temp_');
-
-    return Dismissible(
-      key: ValueKey(todo.id),
-      direction: DismissDirection.endToStart,
-      onDismissed: (_) => onDelete(),
-      background: Container(
-        color: Colors.red,
-        alignment: Alignment.centerRight,
-        padding: const EdgeInsets.only(right: 16),
-        child: const Icon(Icons.delete, color: Colors.white),
-      ),
-      child: ListTile(
-        leading: Stack(
-          alignment: Alignment.center,
-          children: [
-            Checkbox(
-              value: todo.completed,
-              onChanged: (_) => onToggle(),
-            ),
-            if (isOptimistic)
-              const SizedBox(
-                width: 24,
-                height: 24,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                ),
-              ),
-          ],
-        ),
-        title: Text(
-          todo.title,
-          style: TextStyle(
-            decoration: todo.completed ? TextDecoration.lineThrough : null,
-            color: todo.completed ? Colors.grey : null,
-          ),
-        ),
-        trailing: IconButton(
-          icon: const Icon(Icons.delete),
-          onPressed: onDelete,
-        ),
       ),
     );
   }

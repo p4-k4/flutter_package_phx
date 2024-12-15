@@ -1,15 +1,13 @@
 defmodule PhoenixTodoWeb.UserSocket do
   use Phoenix.Socket
 
-  require Logger
-
   # A Socket handler
   #
   # It's possible to control the websocket connection and
   # assign values that can be accessed by your channel topics.
 
   ## Channels
-  channel "todos:*", PhoenixTodoWeb.TodoChannel
+  channel "todo:*", PhoenixTodoWeb.TodoChannel
 
   # Socket params are passed from the client and can
   # be used to verify and authenticate a user. After
@@ -18,14 +16,12 @@ defmodule PhoenixTodoWeb.UserSocket do
   #
   #     {:ok, assign(socket, :user_id, verified_user_id)}
   #
-  # To deny connection, return `:error` or `{:error, term}`.
+  # To deny connection, return `:error`.
   #
   # See `Phoenix.Token` documentation for examples in
   # performing token verification on connect.
   @impl true
-  def connect(params, socket, connect_info) do
-    Logger.debug("Socket connect params: #{inspect(params)}")
-    Logger.debug("Socket connect info: #{inspect(connect_info)}")
+  def connect(_params, socket, _connect_info) do
     {:ok, socket}
   end
 
@@ -41,10 +37,4 @@ defmodule PhoenixTodoWeb.UserSocket do
   # Returning `nil` makes this socket anonymous.
   @impl true
   def id(_socket), do: nil
-
-  # Support both V1 and V2 serializers
-  def serializer do
-    [{Phoenix.Socket.V2.JSONSerializer, "~> 2.0.0"},
-     {Phoenix.Socket.V1.JSONSerializer, "~> 1.0.0"}]
-  end
 end

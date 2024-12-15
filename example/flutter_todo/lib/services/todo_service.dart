@@ -3,237 +3,344 @@ import 'package:phx/phx.dart';
 import '../models/todo.dart';
 
 class TodoService extends ChangeNotifier {
-  final SyncManager _syncManager;
+  late final SyncManager _syncManager;
+  late final PhxClient _client;
+  final _todoChannel = 'todo:list';
   List<Todo> _todos = [];
   bool _isLoading = true;
+  bool _hasError = false;
   String? _error;
   bool _isOffline = false;
+  SyncState _syncState = SyncState.disconnected;
+  DateTime? _lastSynced;
+  bool _processingPendingOperations = false;
+  bool _channelJoined = false;
   bool _isInitialized = false;
 
-  TodoService()
-      : _syncManager = SyncManager(
-          endpoint: 'ws://localhost:4000/socket/websocket',
-          client: PhxClient(
-            'ws://localhost:4000/socket/websocket',
-            heartbeatInterval: const Duration(seconds: 30),
-          ),
-        );
+  // Use 127.0.0.1 instead of localhost for iOS simulator
+  final _serverUrl = 'ws://127.0.0.1:4000/socket/websocket';
 
-  List<Todo> get todos => List.unmodifiable(_todos);
-  bool get isLoading => _isLoading;
-  String? get error => _error;
-  bool get hasError => _error != null;
-  bool get isOffline => _isOffline;
+  TodoService() {
+    _client = PhxClient(_serverUrl);
+    _syncManager = SyncManager(
+      endpoint: _serverUrl,
+      client: _client,
+    );
 
-  Future<void> initialize() async {
-    if (_isInitialized) return;
-
-    try {
-      _isLoading = true;
-      notifyListeners();
-
-      // Initialize and connect sequentially
-      await _syncManager.init();
-      await _syncManager.connect();
-
-      // Listen for sync state changes
-      _syncManager.syncStateStream.listen((state) {
-        _isOffline = state != SyncState.connected;
-        if (!_isOffline && _error != null) {
-          _error = null;
-        }
-        notifyListeners();
-      });
-
-      // Join the todos channel and set up handlers
-      final response = await _syncManager.joinChannel(
-        'todos:list',
-        handlers: {
-          'todo_created': (payload) {
-            print('Received todo_created: $payload');
-            final todo = Todo.fromJson(Map<String, dynamic>.from(payload));
-
-            // Remove any optimistic todo with a matching temporary ID
-            _todos.removeWhere((t) => t.id.startsWith('temp_'));
-
-            // Add the new todo at the beginning of the list
-            _todos.insert(0, todo);
-            notifyListeners();
-          },
-          'todo_updated': (payload) {
-            print('Received todo_updated: $payload');
-            final updatedTodo =
-                Todo.fromJson(Map<String, dynamic>.from(payload));
-
-            final index =
-                _todos.indexWhere((todo) => todo.id == updatedTodo.id);
-            if (index != -1) {
-              _todos[index] = updatedTodo;
-              notifyListeners();
-            }
-          },
-          'todo_deleted': (payload) {
-            print('Received todo_deleted: $payload');
-            final deletedTodo =
-                Todo.fromJson(Map<String, dynamic>.from(payload));
-
-            final index =
-                _todos.indexWhere((todo) => todo.id == deletedTodo.id);
-            if (index != -1) {
-              _todos.removeAt(index);
-              notifyListeners();
-            }
-          },
-        },
-      );
-
-      // Handle initial todos from join response
-      if (response.containsKey('todos')) {
-        final todosList = response['todos'] as List;
-        _todos = todosList
-            .map((todo) => Todo.fromJson(Map<String, dynamic>.from(todo)))
-            .toList();
+    // Listen for messages from the server
+    _client.messageStream?.listen((PhxMessage message) {
+      if (message.topic == _todoChannel &&
+          message.type == PhxMessageType.event) {
+        _handleMessage(message.payload);
       }
+    });
+    _client.connectionStateStream?.listen(_handleConnectionState);
 
-      _isInitialized = true;
-      _isLoading = false;
+    // Listen for sync state changes
+    _syncManager.syncStateStream?.listen((state) async {
+      final previousState = _syncState;
+      _syncState = state;
+
+      // Only process operations and refresh todos when transitioning to connected state
+      // and not already processing operations
+      if (state == SyncState.connected &&
+          !_processingPendingOperations &&
+          _isInitialized) {
+        _processingPendingOperations = true;
+        try {
+          // Ensure channel is joined before refreshing todos
+          if (!_channelJoined) {
+            final result = await _syncManager.joinChannel(_todoChannel);
+            if (result['status'] == 'ok') {
+              _channelJoined = true;
+            } else {
+              print('Failed to join channel: $result');
+              return;
+            }
+          }
+
+          // Get fresh todos from server after processing operations
+          await _refreshTodos();
+          _lastSynced = DateTime.now();
+        } finally {
+          _processingPendingOperations = false;
+        }
+      }
       notifyListeners();
-    } catch (e) {
-      _error = 'Failed to initialize: $e';
-      _isLoading = false;
-      notifyListeners();
-      rethrow;
+    });
+  }
+
+  // Getters
+  List<Todo> get todos => _todos;
+  bool get isLoading => _isLoading;
+  bool get hasError => _hasError;
+  String? get error => _error;
+  bool get isOffline => _isOffline;
+  SyncState get syncState => _syncState;
+  DateTime? get lastSynced => _lastSynced;
+
+  String get statusText {
+    switch (_syncState) {
+      case SyncState.connected:
+        final lastSync = _lastSynced;
+        if (lastSync != null) {
+          final difference = DateTime.now().difference(lastSync);
+          if (difference.inSeconds < 60) {
+            return 'Connected • Last synced just now';
+          } else if (difference.inMinutes < 60) {
+            return 'Connected • Last synced ${difference.inMinutes}m ago';
+          } else {
+            return 'Connected • Last synced ${difference.inHours}h ago';
+          }
+        }
+        return 'Connected';
+      case SyncState.disconnected:
+        return 'Offline';
+      case SyncState.syncing:
+        return 'Syncing...';
+      default:
+        return '';
     }
   }
 
-  Future<void> addTodo(String title) async {
-    if (title.isEmpty) return;
-
+  Future<void> _refreshTodos() async {
     try {
-      // Create an optimistic todo
-      final optimisticId = 'temp_${DateTime.now().millisecondsSinceEpoch}';
-      final optimisticTodo = Todo(
-        id: optimisticId,
-        title: title,
-        completed: false,
-      );
-
-      // Add optimistically
-      _todos.insert(0, optimisticTodo);
-      notifyListeners();
-
-      try {
-        await _syncManager.push(
-          'todos:list',
-          'event',
-          {
-            'event': 'new_todo',
-            'title': title,
-          },
-        );
-      } catch (e) {
-        // Remove optimistic todo on error
-        _todos.removeWhere((todo) => todo.id == optimisticId);
-        notifyListeners();
-
-        if (e.toString().contains('Not connected')) {
-          _isOffline = true;
-          _error = 'Failed to sync: Device is offline';
-        } else {
-          _error = 'Failed to add todo: $e';
+      final result = await _client.push(_todoChannel, 'get_todos', {});
+      if (result.containsKey('response')) {
+        final response = result['response'] as Map<String, dynamic>;
+        if (response.containsKey('todos')) {
+          final todosList = response['todos'] as List;
+          final todos = todosList
+              .map((todo) => Todo.fromJson(todo as Map<String, dynamic>))
+              .toList();
+          _setTodos(todos);
         }
-        notifyListeners();
       }
     } catch (e) {
-      _error = 'Failed to add todo: $e';
-      notifyListeners();
+      print('Error refreshing todos: $e');
+    }
+  }
+
+  Future<void> initialize() async {
+    try {
+      _setLoading(true);
+      _clearError();
+      await _syncManager.init();
+
+      // Join channel only once during initialization
+      if (!_channelJoined) {
+        final result = await _syncManager.joinChannel(_todoChannel);
+        if (result['status'] == 'ok') {
+          _channelJoined = true;
+        } else {
+          print('Failed to join channel during initialization: $result');
+        }
+      }
+
+      _isInitialized = true;
+
+      // If we're already connected after hot reload, refresh todos immediately
+      if (_syncManager.currentState == SyncState.connected &&
+          !_processingPendingOperations) {
+        _processingPendingOperations = true;
+        try {
+          await _refreshTodos();
+          _lastSynced = DateTime.now();
+        } finally {
+          _processingPendingOperations = false;
+        }
+      }
+    } catch (e, stackTrace) {
+      print('Error in initialize: $e');
+      print('Stack trace: $stackTrace');
+      _setError(e.toString());
+    } finally {
+      _setLoading(false);
+    }
+  }
+
+  Future<void> addTodo(String text) async {
+    try {
+      _clearError();
+      final result = await _syncManager.push(
+        _todoChannel,
+        'add_todo',
+        {'text': text},
+      );
+      print('Add todo result: $result');
+    } catch (e) {
+      print('Error adding todo: $e');
+      _setError(e.toString());
     }
   }
 
   Future<void> toggleTodo(Todo todo) async {
     try {
-      // Optimistically update
-      final index = _todos.indexWhere((t) => t.id == todo.id);
-      if (index == -1) return;
-
-      final updatedTodo = todo.copyWith(completed: !todo.completed);
-      _todos[index] = updatedTodo;
-      notifyListeners();
-
-      try {
-        await _syncManager.push(
-          'todos:list',
-          'event',
-          {
-            'event': 'update_todo',
-            'id': todo.id,
-            'completed': !todo.completed,
-          },
-        );
-      } catch (e) {
-        // Revert on error
-        _todos[index] = todo;
-        notifyListeners();
-
-        if (e.toString().contains('Not connected')) {
-          _isOffline = true;
-          _error = 'Failed to sync: Device is offline';
-        } else {
-          _error = 'Failed to update todo: $e';
-        }
-        notifyListeners();
-      }
+      _clearError();
+      final result = await _syncManager.push(
+        _todoChannel,
+        'update_todo',
+        {
+          'id': todo.id,
+          'completed': !todo.completed,
+        },
+      );
+      print('Toggle todo result: $result');
     } catch (e) {
-      _error = 'Failed to update todo: $e';
-      notifyListeners();
+      print('Error toggling todo: $e');
+      _setError(e.toString());
+    }
+  }
+
+  Future<void> updateTodo(Todo todo) async {
+    try {
+      _clearError();
+      final result = await _syncManager.push(
+        _todoChannel,
+        'update_todo',
+        todo.toJson(),
+      );
+      print('Update todo result: $result');
+    } catch (e) {
+      print('Error updating todo: $e');
+      _setError(e.toString());
     }
   }
 
   Future<void> deleteTodo(Todo todo) async {
     try {
-      // Remove optimistically
-      final index = _todos.indexWhere((t) => t.id == todo.id);
-      if (index == -1) return;
-
-      final deletedTodo = _todos.removeAt(index);
-      notifyListeners();
-
-      try {
-        await _syncManager.push(
-          'todos:list',
-          'event',
-          {
-            'event': 'delete_todo',
-            'id': todo.id,
-          },
-        );
-      } catch (e) {
-        // Restore on error
-        _todos.insert(index, deletedTodo);
-        notifyListeners();
-
-        if (e.toString().contains('Not connected')) {
-          _isOffline = true;
-          _error = 'Failed to sync: Device is offline';
-        } else {
-          _error = 'Failed to delete todo: $e';
-        }
-        notifyListeners();
-      }
+      _clearError();
+      final result = await _syncManager.push(
+        _todoChannel,
+        'delete_todo',
+        {'id': todo.id},
+      );
+      print('Delete todo result: $result');
     } catch (e) {
-      _error = 'Failed to delete todo: $e';
-      notifyListeners();
+      print('Error deleting todo: $e');
+      _setError(e.toString());
     }
   }
 
-  void clearError() {
+  Future<void> clearDatabases() async {
+    try {
+      // Close existing connections
+      await _syncManager.dispose();
+
+      // Create a new SQLiteDatabase instance to clear records
+      final db = SQLiteDatabase();
+      await db.init();
+      await db.clear();
+      await db.close();
+
+      // Create a new PendingOperationsStore instance to clear operations
+      final store = PendingOperationsStore();
+      await store.init();
+      await store.clear();
+      await store.close();
+
+      // Reinitialize sync manager
+      _client = PhxClient(_serverUrl);
+      _syncManager = SyncManager(
+        endpoint: _serverUrl,
+        client: _client,
+      );
+
+      // Reset state
+      _channelJoined = false;
+      _isInitialized = false;
+      _todos = [];
+
+      // Reinitialize
+      await initialize();
+
+      notifyListeners();
+    } catch (e) {
+      print('Error clearing databases: $e');
+      _setError(e.toString());
+    }
+  }
+
+  void _handleMessage(Map<String, dynamic> payload) {
+    try {
+      print('Received message: $payload');
+      if (payload.isEmpty) {
+        print('Empty payload received');
+        return;
+      }
+
+      final event = payload['event'];
+      if (event == null) {
+        print('No event in payload');
+        return;
+      }
+
+      final response = payload['response'] as Map<String, dynamic>?;
+      if (response == null) {
+        print('No response in payload');
+        return;
+      }
+
+      switch (event) {
+        case 'todo_added':
+        case 'todo_updated':
+        case 'todo_deleted':
+          // Refresh todos from server for any change
+          _refreshTodos();
+          break;
+        default:
+          print('Unknown event: $event');
+      }
+    } catch (e, stackTrace) {
+      print('Error handling message: $e');
+      print('Stack trace: $stackTrace');
+      print('Payload: $payload');
+    }
+  }
+
+  void _handleConnectionState(bool connected) {
+    _isOffline = !connected;
+    if (!connected) {
+      _channelJoined = false;
+    }
+    notifyListeners();
+  }
+
+  void _setTodos(List<Todo> todos) {
+    _todos = todos;
+    notifyListeners();
+  }
+
+  void _setLoading(bool loading) {
+    _isLoading = loading;
+    notifyListeners();
+  }
+
+  void _setError(String error) {
+    _hasError = true;
+    _error = error;
+    notifyListeners();
+  }
+
+  void _clearError() {
+    _hasError = false;
     _error = null;
     notifyListeners();
   }
 
   @override
-  void dispose() {
-    _syncManager.dispose();
-    super.dispose();
+  void dispose() async {
+    // Clear pending operations before disposing
+    final store = PendingOperationsStore();
+    try {
+      await store.init();
+      await store.clear();
+    } catch (e) {
+      print('Error clearing pending operations on dispose: $e');
+    } finally {
+      await store.close();
+      await _syncManager.dispose();
+      super.dispose();
+    }
   }
 }

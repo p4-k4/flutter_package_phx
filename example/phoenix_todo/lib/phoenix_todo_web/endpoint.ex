@@ -7,20 +7,15 @@ defmodule PhoenixTodoWeb.Endpoint do
   @session_options [
     store: :cookie,
     key: "_phoenix_todo_key",
-    signing_salt: "aTsRogFe",
+    signing_salt: "Hs+Hy+Hs",
     same_site: "Lax"
   ]
 
-  socket "/live", Phoenix.LiveView.Socket,
-    websocket: [connect_info: [session: @session_options]],
-    longpoll: [connect_info: [session: @session_options]]
-
-  # Socket for Flutter client communication
   socket "/socket", PhoenixTodoWeb.UserSocket,
     websocket: [
-      timeout: 60000,
+      timeout: 45_000,
       check_origin: false,
-      serializer: [{Phoenix.Socket.V2.JSONSerializer, "~> 2.0.0"}]
+      transport: Phoenix.Transports.WebSocket
     ],
     longpoll: false
 
@@ -58,5 +53,11 @@ defmodule PhoenixTodoWeb.Endpoint do
   plug Plug.MethodOverride
   plug Plug.Head
   plug Plug.Session, @session_options
+
+  plug CORSPlug,
+    origin: ["*"],
+    headers: ["*"],
+    methods: ["*"]
+
   plug PhoenixTodoWeb.Router
 end
