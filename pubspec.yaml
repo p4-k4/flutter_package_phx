@@ -1,0 +1,19 @@
+name: phx
+description: A Flutter package for Phoenix channels with offline support, featuring automatic message queueing and reconnection handling.
+version: 0.0.1
+homepage: https://github.com/p4-k4/flutter_package_phx
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+  flutter: ">=3.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  web_socket_channel: ^2.4.0
+  shared_preferences: ^2.2.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^2.0.0
